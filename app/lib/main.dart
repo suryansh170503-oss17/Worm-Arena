@@ -11,6 +11,10 @@ void main() => runApp(const WormArenaApp());
 const lime = Color(0xFFB7F34A);
 const dark = Color(0xFF101611);
 const panel = Color(0xFF1B261D);
+// Colors are assigned by the SERVER (players[].color) so every phone shows the same colors.
+const wormColors = [Color(0xFFB7F34A), Color(0xFF58D7FF), Color(0xFFFF8A65),
+  Color(0xFFD7A7FF), Color(0xFFFFD54F), Color(0xFFFF80AB), Color(0xFF80CBC4), Colors.white];
+Color colorOf(dynamic i) => wormColors[((i ?? 0) as num).toInt() % wormColors.length];
 
 class WormArenaApp extends StatelessWidget {
   const WormArenaApp({super.key});
@@ -158,7 +162,8 @@ class _LobbyScreenState extends State<LobbyScreen> {
   Map<String, dynamic> positions = {};
   Map<String, dynamic> worms = {};
   List<dynamic> food = [];
-  double worldH = 9 / 16;
+  double worldW = 3.0, worldH = 3.0 * 9 / 16;
+  String endReason = '';
   double _accDx = 0, _accDy = 0;
   List<Map<String, dynamic>> finalRanking = [];
   Timer? mover;
@@ -179,18 +184,26 @@ class _LobbyScreenState extends State<LobbyScreen> {
             players = (msg['players'] as List? ?? []).map((e) => Map<String,dynamic>.from(e)).toList();
             positions = Map<String,dynamic>.from(msg['positions'] ?? {});
             worms = Map<String,dynamic>.from(msg['worms'] ?? {});
-            food = List<dynamic>.from(msg['food'] ?? []);
+            if (msg.containsKey('food')) food = List<dynamic>.from(msg['food'] ?? []); // sent only when it changes
+            worldW = ((msg['worldW'] ?? worldW) as num).toDouble();
             worldH = ((msg['worldH'] ?? worldH) as num).toDouble();
             final wasStarted = started;
             started = msg['started'] == true;
             if (started != wasStarted) {
               _setMatchDisplayMode(started);
+              if (started) { finalRanking = []; endReason = ''; }
             }
             secondsLeft = msg['secondsLeft'] ?? 0;
             minutes = msg['minutes'] ?? minutes;
             status = started ? 'Match in progress' : 'Waiting for players';
           }
-          if (msg['type'] == 'ended') { started = false; status = 'Match finished!'; finalRanking = List<Map<String,dynamic>>.from((msg['ranking'] ?? []).map((e) => Map<String,dynamic>.from(e))); }
+          if (msg['type'] == 'ended') {
+            if (started) _setMatchDisplayMode(false); // return to portrait lobby + show system bars
+            started = false;
+            status = 'Match finished!';
+            endReason = '${msg['reason'] ?? ''}';
+            finalRanking = List<Map<String,dynamic>>.from((msg['ranking'] ?? []).map((e) => Map<String,dynamic>.from(e)));
+          }
         });
       } catch (_) {}
     }, onDone: () { if (mounted) setState(() => status = 'Disconnected from server'); });
@@ -215,15 +228,14 @@ class _LobbyScreenState extends State<LobbyScreen> {
 
   void startMatch() => send({'type': 'start', 'playerId': widget.playerId, 'roomCode': roomCode});
   void move(double dx, double dy) {
-    // Pixel-space drag deltas are accumulated between sends so the steering
-    // direction is smooth. The arena is letterboxed to a fixed 16:9 world, so a
-    // pixel-space direction maps 1:1 to world direction (no stretching).
+    // Less sensitive steering: pixel deltas are accumulated, tiny jitter is ignored,
+    // and the server additionally limits how fast the worm can turn (TURN_RATE).
     _accDx += dx;
     _accDy += dy;
     final now = DateTime.now();
-    if (now.difference(_lastSteerSent).inMilliseconds < 35) return;
+    if (now.difference(_lastSteerSent).inMilliseconds < 50) return;
     final magnitude = sqrt(_accDx * _accDx + _accDy * _accDy);
-    if (magnitude < 1.0) return; // ignore sub-pixel jitter, keep accumulating
+    if (magnitude < 5.0) return; // dead zone in pixels; keep accumulating
     _lastSteerSent = now;
     final dxn = _accDx / magnitude, dyn = _accDy / magnitude;
     _accDx = 0; _accDy = 0;
@@ -257,13 +269,14 @@ class _LobbyScreenState extends State<LobbyScreen> {
         body: LayoutBuilder(
           builder: (context, constraints) => GestureDetector(
             behavior: HitTestBehavior.opaque,
+            onPanStart: (_) { _accDx = 0; _accDy = 0; },
             onPanUpdate: (details) {
               move(details.delta.dx, details.delta.dy);
             },
             child: Stack(
               fit: StackFit.expand,
               children: [
-                CustomPaint(painter: ArenaPainter(worms, food, widget.playerId, worldH)),
+                CustomPaint(painter: ArenaPainter(worms, food, widget.playerId, worldW, worldH)),
                 Positioned(
                   top: 8,
                   left: 12,
@@ -283,13 +296,22 @@ class _LobbyScreenState extends State<LobbyScreen> {
                         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
                         decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(12)),
                         child: Text(
-                          'Score ${myPlayer['score'] ?? 0}  •  ${players.length} players',
+                          'Score ${myPlayer['score'] ?? 0}  •  Alive ${players.where((p) => p['alive'] == true).length}/${players.length}',
                           style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
                         ),
                       ),
                     ],
                   ),
                 ),
+                if (myPlayer['alive'] == false)
+                  Positioned(
+                    top: 52, left: 0, right: 0,
+                    child: Center(child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                      decoration: BoxDecoration(color: Colors.redAccent.withOpacity(.85), borderRadius: BorderRadius.circular(12)),
+                      child: const Text('ELIMINATED — watching the rest', style: TextStyle(fontWeight: FontWeight.bold)),
+                    )),
+                  ),
                 const Positioned(
                   left: 12,
                   bottom: 8,
@@ -328,18 +350,22 @@ class _LobbyScreenState extends State<LobbyScreen> {
             const SizedBox(height: 8),
             Expanded(
               child: ListView(children: players.map((p) => ListTile(
-                leading: const CircleAvatar(backgroundColor: lime, child: Icon(Icons.person, color: dark)),
+                leading: CircleAvatar(backgroundColor: colorOf(p['color']), child: const Icon(Icons.person, color: dark)),
                 title: Text('${p['name'] ?? 'Player'}${p['id'] == widget.playerId ? ' (You)' : ''}'),
-                subtitle: Text('Score: ${p['score'] ?? 0}  •  Length: ${p['length'] ?? 8}${p['alive'] == false ? '  •  Respawning' : ''}'),
+                subtitle: Text('Score: ${p['score'] ?? 0}  •  Length: ${p['length'] ?? 8}'),
                 trailing: p['host'] == true ? const Chip(label: Text('HOST')) : null,
               )).toList()),
             ),
             if (finalRanking.isNotEmpty) ...[
-              const Text('MATCH RESULTS', textAlign: TextAlign.center, style: TextStyle(color: lime, fontSize: 20, fontWeight: FontWeight.bold)),
+              Text('WINNER: ${finalRanking.first['name']}', textAlign: TextAlign.center,
+                style: const TextStyle(color: lime, fontSize: 24, fontWeight: FontWeight.w900)),
+              Text(endReason == 'last_alive' ? 'Last worm standing' : endReason == 'time' ? 'Time up — highest score' : 'Everyone was eliminated — highest score',
+                textAlign: TextAlign.center, style: const TextStyle(color: Colors.white60)),
+              const SizedBox(height: 6),
               ...finalRanking.take(8).map((p) => ListTile(
-                leading: Text('#${p['rank']}', style: const TextStyle(color: lime, fontWeight: FontWeight.bold)),
+                leading: Text('#${p['rank']}', style: TextStyle(color: colorOf(p['color']), fontWeight: FontWeight.bold)),
                 title: Text('${p['name']}'),
-                trailing: Text('${p['score']} pts'),
+                trailing: Text('${p['score']} pts • len ${p['length']}'),
               )),
               if (isHost) ElevatedButton(
                 onPressed: () { finalRanking.clear(); setState(() {}); startMatch(); },
@@ -364,60 +390,105 @@ class _LobbyScreenState extends State<LobbyScreen> {
 
 class ArenaPainter extends CustomPainter {
   final Map<String, dynamic> worms;
-  final List<dynamic> food;
+  final List<dynamic> food; // flat [x0,y0,x1,y1,...]
   final String myId;
-  final double worldH;
-  ArenaPainter(this.worms, this.food, this.myId, this.worldH);
-  final colors = const [Color(0xFFB7F34A), Color(0xFF58D7FF), Color(0xFFFF8A65),
-    Color(0xFFD7A7FF), Color(0xFFFFD54F), Color(0xFFFF80AB), Color(0xFF80CBC4), Colors.white];
+  final double worldW, worldH;
+  ArenaPainter(this.worms, this.food, this.myId, this.worldW, this.worldH);
+
+  static const double viewW = 1.0; // world units visible across the screen width
+
+  // Flat [x,y,x,y...] -> point i
+  Offset _pt(List l, int i) => Offset((l[2 * i] as num).toDouble(), (l[2 * i + 1] as num).toDouble());
+
   @override
   void paint(Canvas canvas, Size size) {
-    // Letterbox the 1.0 x worldH world into the screen with uniform scale.
-    final scale = min(size.width / 1.0, size.height / worldH);
-    final ox = (size.width - scale) / 2;
-    final oy = (size.height - worldH * scale) / 2;
-    Offset toScreen(num x, num y) => Offset(ox + x.toDouble() * scale, oy + y.toDouble() * scale);
+    final scale = size.width / viewW;
+    final viewH = size.height / scale;
+
+    // Camera: follow my worm; if I'm eliminated, watch the first surviving worm.
+    Offset? focus;
+    final mine = worms[myId];
+    if (mine is Map && (mine['trail'] as List? ?? []).length >= 2) {
+      focus = _pt(mine['trail'] as List, 0);
+    } else {
+      for (final w in worms.values) {
+        if (w is Map && (w['trail'] as List? ?? []).length >= 2) { focus = _pt(w['trail'] as List, 0); break; }
+      }
+    }
+    focus ??= Offset(worldW / 2, worldH / 2);
+    final cx = focus.dx.clamp(min(viewW / 2, worldW / 2), max(worldW - viewW / 2, worldW / 2)).toDouble();
+    final cy = focus.dy.clamp(min(viewH / 2, worldH / 2), max(worldH - viewH / 2, worldH / 2)).toDouble();
+    final left = cx - viewW / 2, top = cy - viewH / 2;
+    Offset toScreen(double x, double y) => Offset((x - left) * scale, (y - top) * scale);
 
     canvas.drawRect(Offset.zero & size, Paint()..color = Colors.black);
-    final arena = Rect.fromLTWH(ox, oy, scale, worldH * scale);
+    final arena = Rect.fromPoints(toScreen(0, 0), toScreen(worldW, worldH));
     canvas.drawRect(arena, Paint()..color = const Color(0xFF17251A));
-    final grid = Paint()..color = Colors.white.withOpacity(.06)..strokeWidth = 1;
-    final step = scale / 40;
-    for (double x = 0; x <= arena.width; x += step) canvas.drawLine(Offset(ox + x, oy), Offset(ox + x, oy + arena.height), grid);
-    for (double y = 0; y <= arena.height; y += step) canvas.drawLine(Offset(ox, oy + y), Offset(ox + arena.width, oy + y), grid);
-    canvas.drawRect(arena, Paint()..color = lime.withOpacity(.5)..style = PaintingStyle.stroke..strokeWidth = 2);
 
+    // Grid (world-anchored so movement is visible)
+    final grid = Paint()..color = Colors.white.withOpacity(.06)..strokeWidth = 1;
+    const step = 0.05;
+    for (double gx = (left / step).floorToDouble() * step; gx <= left + viewW; gx += step) {
+      if (gx < 0 || gx > worldW) continue;
+      final sx = (gx - left) * scale;
+      canvas.drawLine(Offset(sx, max(0, arena.top)), Offset(sx, min(size.height, arena.bottom)), grid);
+    }
+    for (double gy = (top / step).floorToDouble() * step; gy <= top + viewH; gy += step) {
+      if (gy < 0 || gy > worldH) continue;
+      final sy = (gy - top) * scale;
+      canvas.drawLine(Offset(max(0, arena.left), sy), Offset(min(size.width, arena.right), sy), grid);
+    }
+    canvas.drawRect(arena, Paint()..color = Colors.redAccent.withOpacity(.7)..style = PaintingStyle.stroke..strokeWidth = 3);
+
+    // Food
     final foodPaint = Paint()..color = const Color(0xFFFFD54F);
     final foodR = max(3.5, scale * 0.012);
-    for (final item in food) {
-      if (item is! Map) continue;
-      canvas.drawCircle(toScreen(item['x'] ?? .5, item['y'] ?? .25), foodR, foodPaint);
+    for (int i = 0; i + 1 < food.length; i += 2) {
+      final o = toScreen((food[i] as num).toDouble(), (food[i + 1] as num).toDouble());
+      if (o.dx < -10 || o.dy < -10 || o.dx > size.width + 10 || o.dy > size.height + 10) continue;
+      canvas.drawCircle(o, foodR, foodPaint);
     }
+
+    // Worms (color comes from the server so all phones agree)
     final headR = max(7.0, scale * 0.0115);
     final bodyR = headR * 0.8;
-    int i = 0;
-    worms.forEach((id, data) {
-      if (data is! Map) return;
-      if (data['alive'] == false) { i++; return; }
+    for (final entry in worms.entries) {
+      final data = entry.value;
+      if (data is! Map || data['alive'] == false) continue;
       final trail = (data['trail'] as List? ?? []);
-      if (trail.isEmpty) { i++; return; }
-      final c = id == myId ? const Color(0xFFB7F34A) : colors[i % colors.length];
+      final n = trail.length ~/ 2;
+      if (n == 0) continue;
+      final c = colorOf(data['color']);
       final bodyPaint = Paint()..color = c;
-      final outline = Paint()..color = c.withOpacity(.32)..style = PaintingStyle.stroke..strokeWidth = 2;
-      for (int j = trail.length - 1; j >= 0; j--) {
-        final pt = trail[j];
-        if (pt is! Map) continue;
-        final o = toScreen(pt['x'] ?? .5, pt['y'] ?? .25);
+      final isMe = entry.key == myId;
+      for (int j = n - 1; j >= 0; j--) {
+        final o = toScreen(_pt(trail, j).dx, _pt(trail, j).dy);
         canvas.drawCircle(o, j == 0 ? headR : bodyR, bodyPaint);
         if (j == 0) {
-          canvas.drawCircle(o, headR * 1.35, outline);
+          canvas.drawCircle(o, headR * 1.35, Paint()..color = (isMe ? Colors.white : c).withOpacity(isMe ? .8 : .32)..style = PaintingStyle.stroke..strokeWidth = 2);
           final eye = Paint()..color = const Color(0xFF101611);
           canvas.drawCircle(o + Offset(-headR * .3, -headR * .25), headR * .18, eye);
           canvas.drawCircle(o + Offset(headR * .3, -headR * .25), headR * .18, eye);
         }
       }
-      i++;
-    });
+    }
+
+    // Minimap (bottom-right)
+    const mw = 120.0;
+    final mh = mw * worldH / worldW;
+    final mr = Rect.fromLTWH(size.width - mw - 12, size.height - mh - 12, mw, mh);
+    canvas.drawRect(mr, Paint()..color = Colors.black.withOpacity(.55));
+    canvas.drawRect(mr, Paint()..color = Colors.white30..style = PaintingStyle.stroke);
+    Offset mm(Offset w) => Offset(mr.left + w.dx / worldW * mw, mr.top + w.dy / worldH * mh);
+    canvas.drawRect(Rect.fromPoints(mm(Offset(left, top)), mm(Offset(left + viewW, top + viewH))),
+      Paint()..color = Colors.white54..style = PaintingStyle.stroke);
+    for (final entry in worms.entries) {
+      final data = entry.value;
+      if (data is! Map || data['alive'] == false) continue;
+      final trail = (data['trail'] as List? ?? []);
+      if (trail.length < 2) continue;
+      canvas.drawCircle(mm(_pt(trail, 0)), entry.key == myId ? 3.5 : 2.5, Paint()..color = colorOf(data['color']));
+    }
   }
   @override
   bool shouldRepaint(covariant ArenaPainter oldDelegate) => true;
