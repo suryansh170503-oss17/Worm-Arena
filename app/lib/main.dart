@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:uuid/uuid.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
@@ -177,7 +178,11 @@ class _LobbyScreenState extends State<LobbyScreen> {
             positions = Map<String,dynamic>.from(msg['positions'] ?? {});
             worms = Map<String,dynamic>.from(msg['worms'] ?? {});
             food = List<dynamic>.from(msg['food'] ?? []);
+            final wasStarted = started;
             started = msg['started'] == true;
+            if (started != wasStarted) {
+              _setMatchDisplayMode(started);
+            }
             secondsLeft = msg['secondsLeft'] ?? 0;
             minutes = msg['minutes'] ?? minutes;
             status = started ? 'Match in progress' : 'Waiting for players';
@@ -186,6 +191,21 @@ class _LobbyScreenState extends State<LobbyScreen> {
         });
       } catch (_) {}
     }, onDone: () { if (mounted) setState(() => status = 'Disconnected from server'); });
+  }
+
+  Future<void> _setMatchDisplayMode(bool inMatch) async {
+    if (inMatch) {
+      await SystemChrome.setPreferredOrientations(const [
+        DeviceOrientation.landscapeLeft,
+        DeviceOrientation.landscapeRight,
+      ]);
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    } else {
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+      await SystemChrome.setPreferredOrientations(const [
+        DeviceOrientation.portraitUp,
+      ]);
+    }
   }
 
   void send(Map<String, dynamic> data) => widget.channel.sink.add(jsonEncode(data));
@@ -198,80 +218,130 @@ class _LobbyScreenState extends State<LobbyScreen> {
 
   @override
   void dispose() {
-    sub?.cancel(); mover?.cancel(); widget.channel.sink.close(); super.dispose();
+    sub?.cancel();
+    mover?.cancel();
+    widget.channel.sink.close();
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    SystemChrome.setPreferredOrientations(const [DeviceOrientation.portraitUp]);
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final me = players.where((p) => p['id'] == widget.playerId).toList();
     final isHost = me.isNotEmpty && me.first['host'] == true;
+
+    if (started) {
+      final myPlayer = me.isNotEmpty ? me.first : <String, dynamic>{};
+      return Scaffold(
+        body: LayoutBuilder(
+          builder: (context, constraints) => GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onPanUpdate: (details) {
+              if (constraints.maxWidth > 0 && constraints.maxHeight > 0) {
+                move(
+                  details.delta.dx / constraints.maxWidth,
+                  details.delta.dy / constraints.maxHeight,
+                );
+              }
+            },
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                CustomPaint(painter: ArenaPainter(worms, food, widget.playerId)),
+                Positioned(
+                  top: 8,
+                  left: 12,
+                  right: 12,
+                  child: Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                        decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(12)),
+                        child: Text(
+                          '${secondsLeft ~/ 60}:${(secondsLeft % 60).toString().padLeft(2, '0')}',
+                          style: const TextStyle(color: lime, fontSize: 20, fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                      const Spacer(),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                        decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(12)),
+                        child: Text(
+                          'Score ${myPlayer['score'] ?? 0}  •  ${players.length} players',
+                          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const Positioned(
+                  left: 12,
+                  bottom: 8,
+                  child: Text(
+                    'DRAG TO STEER',
+                    style: TextStyle(color: Colors.white70, fontSize: 11, letterSpacing: 1),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
     return Scaffold(
       appBar: AppBar(title: const Text('PRIVATE LOBBY'), backgroundColor: dark),
-      body: Padding(padding: const EdgeInsets.all(16), child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: panel, borderRadius: BorderRadius.circular(16)),
-            child: Column(children: [
-              const Text('ROOM CODE', style: TextStyle(color: Colors.white60)),
-              const SizedBox(height: 4),
-              SelectableText(roomCode, style: const TextStyle(fontSize: 30, fontWeight: FontWeight.w900, color: lime, letterSpacing: 4)),
-              Text('Share this code with friends • $minutes-minute match'),
-              Text(status, style: const TextStyle(color: Colors.white70)),
-            ])),
-          const SizedBox(height: 16),
-          Text('PLAYERS  ${players.length}/8', style: const TextStyle(fontWeight: FontWeight.bold, color: lime)),
-          const SizedBox(height: 8),
-          Expanded(child: ListView(children: players.map((p) => ListTile(
-            leading: const CircleAvatar(backgroundColor: lime, child: Icon(Icons.person, color: dark)),
-            title: Text('${p['name'] ?? 'Player'}${p['id'] == widget.playerId ? ' (You)' : ''}'),
-            subtitle: Text('Score: ${p['score'] ?? 0}  •  Length: ${p['length'] ?? 8}${p['alive'] == false ? '  •  Respawning' : ''}'),
-            trailing: p['host'] == true ? const Chip(label: Text('HOST')) : null,
-          )).toList())),
-          if (started) ...[
-            Text('${secondsLeft ~/ 60}:${(secondsLeft % 60).toString().padLeft(2, '0')}',
-              textAlign: TextAlign.center, style: const TextStyle(fontSize: 34, color: lime, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 8),
-            Expanded(flex: 2, child: ClipRRect(
-              borderRadius: BorderRadius.circular(16),
-              child: LayoutBuilder(builder: (context, constraints) {
-                return GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onPanUpdate: (details) {
-                    // Drag anywhere inside the arena to steer your worm.
-                    // Convert screen pixels to normalized arena coordinates.
-                    final dx = details.delta.dx / constraints.maxWidth;
-                    final dy = details.delta.dy / constraints.maxHeight;
-                    move(dx, dy);
-                  },
-                  child: CustomPaint(
-                    painter: ArenaPainter(worms, food, widget.playerId),
-                    child: const SizedBox.expand(),
-                  ),
-                );
-              }),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(color: panel, borderRadius: BorderRadius.circular(16)),
+              child: Column(children: [
+                const Text('ROOM CODE', style: TextStyle(color: Colors.white60)),
+                const SizedBox(height: 4),
+                SelectableText(roomCode, style: const TextStyle(fontSize: 30, fontWeight: FontWeight.w900, color: lime, letterSpacing: 4)),
+                Text('Share this code with friends • $minutes-minute match'),
+                Text(status, style: const TextStyle(color: Colors.white70)),
+              ]),
             ),
+            const SizedBox(height: 16),
+            Text('PLAYERS  ${players.length}/8', style: const TextStyle(fontWeight: FontWeight.bold, color: lime)),
             const SizedBox(height: 8),
-            const Text(
-              'DRAG YOUR FINGER IN THE ARENA TO MOVE',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.white54, fontSize: 11, letterSpacing: 1),
+            Expanded(
+              child: ListView(children: players.map((p) => ListTile(
+                leading: const CircleAvatar(backgroundColor: lime, child: Icon(Icons.person, color: dark)),
+                title: Text('${p['name'] ?? 'Player'}${p['id'] == widget.playerId ? ' (You)' : ''}'),
+                subtitle: Text('Score: ${p['score'] ?? 0}  •  Length: ${p['length'] ?? 8}${p['alive'] == false ? '  •  Respawning' : ''}'),
+                trailing: p['host'] == true ? const Chip(label: Text('HOST')) : null,
+              )).toList()),
             ),
-          ] else if (finalRanking.isNotEmpty) ...[
-            const Text('MATCH RESULTS', textAlign: TextAlign.center, style: TextStyle(color: lime, fontSize: 20, fontWeight: FontWeight.bold)),
-            ...finalRanking.take(8).map((p) => ListTile(
-              leading: Text('#${p['rank']}', style: const TextStyle(color: lime, fontWeight: FontWeight.bold)),
-              title: Text('${p['name']}'),
-              trailing: Text('${p['score']} pts'),
-            )),
-            if (isHost) ElevatedButton(onPressed: () { finalRanking.clear(); setState(() {}); startMatch(); }, child: const Text('PLAY AGAIN')),
-          ] else if (isHost) ...[
-            ElevatedButton(onPressed: players.length >= 2 ? startMatch : null, child: const Text('START MATCH')),
-            const SizedBox(height: 8),
-            const Text('At least 2 players are needed to start. Invite 4–8 friends for the intended experience.',
-              textAlign: TextAlign.center, style: TextStyle(color: Colors.white54, fontSize: 12)),
+            if (finalRanking.isNotEmpty) ...[
+              const Text('MATCH RESULTS', textAlign: TextAlign.center, style: TextStyle(color: lime, fontSize: 20, fontWeight: FontWeight.bold)),
+              ...finalRanking.take(8).map((p) => ListTile(
+                leading: Text('#${p['rank']}', style: const TextStyle(color: lime, fontWeight: FontWeight.bold)),
+                title: Text('${p['name']}'),
+                trailing: Text('${p['score']} pts'),
+              )),
+              if (isHost) ElevatedButton(
+                onPressed: () { finalRanking.clear(); setState(() {}); startMatch(); },
+                child: const Text('PLAY AGAIN'),
+              ),
+            ] else if (isHost) ...[
+              ElevatedButton(onPressed: players.length >= 2 ? startMatch : null, child: const Text('START MATCH')),
+              const SizedBox(height: 8),
+              const Text(
+                'At least 2 players are needed to start. Invite 4–8 friends for the intended experience.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white54, fontSize: 12),
+              ),
+            ],
           ],
-        ],
-      )),
+        ),
+      ),
     );
   }
 }
