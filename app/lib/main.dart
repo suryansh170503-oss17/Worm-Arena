@@ -158,6 +158,8 @@ class _LobbyScreenState extends State<LobbyScreen> {
   Map<String, dynamic> positions = {};
   Map<String, dynamic> worms = {};
   List<dynamic> food = [];
+  double worldH = 9 / 16;
+  double _accDx = 0, _accDy = 0;
   List<Map<String, dynamic>> finalRanking = [];
   Timer? mover;
   final rng = Random();
@@ -178,6 +180,7 @@ class _LobbyScreenState extends State<LobbyScreen> {
             positions = Map<String,dynamic>.from(msg['positions'] ?? {});
             worms = Map<String,dynamic>.from(msg['worms'] ?? {});
             food = List<dynamic>.from(msg['food'] ?? []);
+            worldH = ((msg['worldH'] ?? worldH) as num).toDouble();
             final wasStarted = started;
             started = msg['started'] == true;
             if (started != wasStarted) {
@@ -212,19 +215,24 @@ class _LobbyScreenState extends State<LobbyScreen> {
 
   void startMatch() => send({'type': 'start', 'playerId': widget.playerId, 'roomCode': roomCode});
   void move(double dx, double dy) {
-    // The server keeps moving in the last direction, so send steering vectors,
-    // not a new absolute position for every finger event.
+    // Pixel-space drag deltas are accumulated between sends so the steering
+    // direction is smooth. The arena is letterboxed to a fixed 16:9 world, so a
+    // pixel-space direction maps 1:1 to world direction (no stretching).
+    _accDx += dx;
+    _accDy += dy;
     final now = DateTime.now();
     if (now.difference(_lastSteerSent).inMilliseconds < 35) return;
-    final magnitude = sqrt(dx * dx + dy * dy);
-    if (magnitude < 0.0005) return;
+    final magnitude = sqrt(_accDx * _accDx + _accDy * _accDy);
+    if (magnitude < 1.0) return; // ignore sub-pixel jitter, keep accumulating
     _lastSteerSent = now;
+    final dxn = _accDx / magnitude, dyn = _accDy / magnitude;
+    _accDx = 0; _accDy = 0;
     send({
       'type': 'steer',
       'playerId': widget.playerId,
       'roomCode': roomCode,
-      'dx': dx / magnitude,
-      'dy': dy / magnitude,
+      'dx': dxn,
+      'dy': dyn,
     });
   }
 
@@ -250,17 +258,12 @@ class _LobbyScreenState extends State<LobbyScreen> {
           builder: (context, constraints) => GestureDetector(
             behavior: HitTestBehavior.opaque,
             onPanUpdate: (details) {
-              if (constraints.maxWidth > 0 && constraints.maxHeight > 0) {
-                move(
-                  details.delta.dx / constraints.maxWidth,
-                  details.delta.dy / constraints.maxHeight,
-                );
-              }
+              move(details.delta.dx, details.delta.dy);
             },
             child: Stack(
               fit: StackFit.expand,
               children: [
-                CustomPaint(painter: ArenaPainter(worms, food, widget.playerId)),
+                CustomPaint(painter: ArenaPainter(worms, food, widget.playerId, worldH)),
                 Positioned(
                   top: 8,
                   left: 12,
@@ -363,22 +366,35 @@ class ArenaPainter extends CustomPainter {
   final Map<String, dynamic> worms;
   final List<dynamic> food;
   final String myId;
-  ArenaPainter(this.worms, this.food, this.myId);
+  final double worldH;
+  ArenaPainter(this.worms, this.food, this.myId, this.worldH);
   final colors = const [Color(0xFFB7F34A), Color(0xFF58D7FF), Color(0xFFFF8A65),
     Color(0xFFD7A7FF), Color(0xFFFFD54F), Color(0xFFFF80AB), Color(0xFF80CBC4), Colors.white];
   @override
   void paint(Canvas canvas, Size size) {
-    canvas.drawRect(Offset.zero & size, Paint()..color = const Color(0xFF17251A));
+    // Letterbox the 1.0 x worldH world into the screen with uniform scale.
+    final scale = min(size.width / 1.0, size.height / worldH);
+    final ox = (size.width - scale) / 2;
+    final oy = (size.height - worldH * scale) / 2;
+    Offset toScreen(num x, num y) => Offset(ox + x.toDouble() * scale, oy + y.toDouble() * scale);
+
+    canvas.drawRect(Offset.zero & size, Paint()..color = Colors.black);
+    final arena = Rect.fromLTWH(ox, oy, scale, worldH * scale);
+    canvas.drawRect(arena, Paint()..color = const Color(0xFF17251A));
     final grid = Paint()..color = Colors.white.withOpacity(.06)..strokeWidth = 1;
-    for (double x = 0; x < size.width; x += 24) canvas.drawLine(Offset(x,0), Offset(x,size.height), grid);
-    for (double y = 0; y < size.height; y += 24) canvas.drawLine(Offset(0,y), Offset(size.width,y), grid);
+    final step = scale / 40;
+    for (double x = 0; x <= arena.width; x += step) canvas.drawLine(Offset(ox + x, oy), Offset(ox + x, oy + arena.height), grid);
+    for (double y = 0; y <= arena.height; y += step) canvas.drawLine(Offset(ox, oy + y), Offset(ox + arena.width, oy + y), grid);
+    canvas.drawRect(arena, Paint()..color = lime.withOpacity(.5)..style = PaintingStyle.stroke..strokeWidth = 2);
+
     final foodPaint = Paint()..color = const Color(0xFFFFD54F);
+    final foodR = max(3.5, scale * 0.012);
     for (final item in food) {
       if (item is! Map) continue;
-      final fx = ((item['x'] ?? .5) as num).toDouble().clamp(0,1) * size.width;
-      final fy = ((item['y'] ?? .5) as num).toDouble().clamp(0,1) * size.height;
-      canvas.drawCircle(Offset(fx,fy), 3.5, foodPaint);
+      canvas.drawCircle(toScreen(item['x'] ?? .5, item['y'] ?? .25), foodR, foodPaint);
     }
+    final headR = max(7.0, scale * 0.0115);
+    final bodyR = headR * 0.8;
     int i = 0;
     worms.forEach((id, data) {
       if (data is! Map) return;
@@ -391,14 +407,13 @@ class ArenaPainter extends CustomPainter {
       for (int j = trail.length - 1; j >= 0; j--) {
         final pt = trail[j];
         if (pt is! Map) continue;
-        final px = ((pt['x'] ?? .5) as num).toDouble().clamp(0,1) * size.width;
-        final py = ((pt['y'] ?? .5) as num).toDouble().clamp(0,1) * size.height;
-        canvas.drawCircle(Offset(px,py), j == 0 ? 8 : 6, bodyPaint);
+        final o = toScreen(pt['x'] ?? .5, pt['y'] ?? .25);
+        canvas.drawCircle(o, j == 0 ? headR : bodyR, bodyPaint);
         if (j == 0) {
-          canvas.drawCircle(Offset(px,py), 11, outline);
+          canvas.drawCircle(o, headR * 1.35, outline);
           final eye = Paint()..color = const Color(0xFF101611);
-          canvas.drawCircle(Offset(px-2.5,py-2), 1.5, eye);
-          canvas.drawCircle(Offset(px+2.5,py-2), 1.5, eye);
+          canvas.drawCircle(o + Offset(-headR * .3, -headR * .25), headR * .18, eye);
+          canvas.drawCircle(o + Offset(headR * .3, -headR * .25), headR * .18, eye);
         }
       }
       i++;
