@@ -161,7 +161,7 @@ class _LobbyScreenState extends State<LobbyScreen> {
   List<Map<String, dynamic>> finalRanking = [];
   Timer? mover;
   final rng = Random();
-  double x = .5, y = .5;
+  DateTime _lastSteerSent = DateTime.fromMillisecondsSinceEpoch(0);
 
   @override
   void initState() {
@@ -212,8 +212,20 @@ class _LobbyScreenState extends State<LobbyScreen> {
 
   void startMatch() => send({'type': 'start', 'playerId': widget.playerId, 'roomCode': roomCode});
   void move(double dx, double dy) {
-    x = (x + dx).clamp(.03, .97); y = (y + dy).clamp(.03, .97);
-    send({'type': 'move', 'playerId': widget.playerId, 'roomCode': roomCode, 'x': x, 'y': y});
+    // The server keeps moving in the last direction, so send steering vectors,
+    // not a new absolute position for every finger event.
+    final now = DateTime.now();
+    if (now.difference(_lastSteerSent).inMilliseconds < 35) return;
+    final magnitude = sqrt(dx * dx + dy * dy);
+    if (magnitude < 0.0005) return;
+    _lastSteerSent = now;
+    send({
+      'type': 'steer',
+      'playerId': widget.playerId,
+      'roomCode': roomCode,
+      'dx': dx / magnitude,
+      'dy': dy / magnitude,
+    });
   }
 
   @override
