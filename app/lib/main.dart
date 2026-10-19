@@ -155,6 +155,9 @@ class _LobbyScreenState extends State<LobbyScreen> {
   bool started = false;
   List<Map<String, dynamic>> players = [];
   Map<String, dynamic> positions = {};
+  Map<String, dynamic> worms = {};
+  List<dynamic> food = [];
+  List<Map<String, dynamic>> finalRanking = [];
   Timer? mover;
   final rng = Random();
   double x = .5, y = .5;
@@ -172,12 +175,14 @@ class _LobbyScreenState extends State<LobbyScreen> {
             roomCode = msg['roomCode'] ?? roomCode;
             players = (msg['players'] as List? ?? []).map((e) => Map<String,dynamic>.from(e)).toList();
             positions = Map<String,dynamic>.from(msg['positions'] ?? {});
+            worms = Map<String,dynamic>.from(msg['worms'] ?? {});
+            food = List<dynamic>.from(msg['food'] ?? []);
             started = msg['started'] == true;
             secondsLeft = msg['secondsLeft'] ?? 0;
             minutes = msg['minutes'] ?? minutes;
             status = started ? 'Match in progress' : 'Waiting for players';
           }
-          if (msg['type'] == 'ended') { started = false; status = 'Match finished!'; }
+          if (msg['type'] == 'ended') { started = false; status = 'Match finished!'; finalRanking = List<Map<String,dynamic>>.from((msg['ranking'] ?? []).map((e) => Map<String,dynamic>.from(e))); }
         });
       } catch (_) {}
     }, onDone: () { if (mounted) setState(() => status = 'Disconnected from server'); });
@@ -219,6 +224,7 @@ class _LobbyScreenState extends State<LobbyScreen> {
           Expanded(child: ListView(children: players.map((p) => ListTile(
             leading: const CircleAvatar(backgroundColor: lime, child: Icon(Icons.person, color: dark)),
             title: Text('${p['name'] ?? 'Player'}${p['id'] == widget.playerId ? ' (You)' : ''}'),
+            subtitle: Text('Score: ${p['score'] ?? 0}  •  Length: ${p['length'] ?? 8}${p['alive'] == false ? '  •  Respawning' : ''}'),
             trailing: p['host'] == true ? const Chip(label: Text('HOST')) : null,
           )).toList())),
           if (started) ...[
@@ -226,7 +232,7 @@ class _LobbyScreenState extends State<LobbyScreen> {
               textAlign: TextAlign.center, style: const TextStyle(fontSize: 34, color: lime, fontWeight: FontWeight.bold)),
             const SizedBox(height: 8),
             Expanded(flex: 2, child: ClipRRect(borderRadius: BorderRadius.circular(16),
-              child: CustomPaint(painter: ArenaPainter(positions, widget.playerId), child: const SizedBox.expand()))),
+              child: CustomPaint(painter: ArenaPainter(worms, food, widget.playerId), child: const SizedBox.expand()))),
             const SizedBox(height: 10),
             Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
               IconButton.filled(onPressed: () => move(-.04, 0), icon: const Icon(Icons.arrow_left)),
@@ -234,6 +240,14 @@ class _LobbyScreenState extends State<LobbyScreen> {
               IconButton.filled(onPressed: () => move(0, .04), icon: const Icon(Icons.arrow_downward)),
               IconButton.filled(onPressed: () => move(.04, 0), icon: const Icon(Icons.arrow_right)),
             ]),
+          ] else if (finalRanking.isNotEmpty) ...[
+            const Text('MATCH RESULTS', textAlign: TextAlign.center, style: TextStyle(color: lime, fontSize: 20, fontWeight: FontWeight.bold)),
+            ...finalRanking.take(8).map((p) => ListTile(
+              leading: Text('#${p['rank']}', style: const TextStyle(color: lime, fontWeight: FontWeight.bold)),
+              title: Text('${p['name']}'),
+              trailing: Text('${p['score']} pts'),
+            )),
+            if (isHost) ElevatedButton(onPressed: () { finalRanking.clear(); setState(() {}); startMatch(); }, child: const Text('PLAY AGAIN')),
           ] else if (isHost) ...[
             ElevatedButton(onPressed: players.length >= 2 ? startMatch : null, child: const Text('START MATCH')),
             const SizedBox(height: 8),
@@ -246,10 +260,12 @@ class _LobbyScreenState extends State<LobbyScreen> {
   }
 }
 
+
 class ArenaPainter extends CustomPainter {
-  final Map<String, dynamic> positions;
+  final Map<String, dynamic> worms;
+  final List<dynamic> food;
   final String myId;
-  ArenaPainter(this.positions, this.myId);
+  ArenaPainter(this.worms, this.food, this.myId);
   final colors = const [Color(0xFFB7F34A), Color(0xFF58D7FF), Color(0xFFFF8A65),
     Color(0xFFD7A7FF), Color(0xFFFFD54F), Color(0xFFFF80AB), Color(0xFF80CBC4), Colors.white];
   @override
@@ -258,13 +274,35 @@ class ArenaPainter extends CustomPainter {
     final grid = Paint()..color = Colors.white.withOpacity(.06)..strokeWidth = 1;
     for (double x = 0; x < size.width; x += 24) canvas.drawLine(Offset(x,0), Offset(x,size.height), grid);
     for (double y = 0; y < size.height; y += 24) canvas.drawLine(Offset(0,y), Offset(size.width,y), grid);
+    final foodPaint = Paint()..color = const Color(0xFFFFD54F);
+    for (final item in food) {
+      if (item is! Map) continue;
+      final fx = ((item['x'] ?? .5) as num).toDouble().clamp(0,1) * size.width;
+      final fy = ((item['y'] ?? .5) as num).toDouble().clamp(0,1) * size.height;
+      canvas.drawCircle(Offset(fx,fy), 3.5, foodPaint);
+    }
     int i = 0;
-    positions.forEach((id, p) {
-      final px = ((p['x'] ?? .5) as num).toDouble().clamp(0,1) * size.width;
-      final py = ((p['y'] ?? .5) as num).toDouble().clamp(0,1) * size.height;
+    worms.forEach((id, data) {
+      if (data is! Map) return;
+      if (data['alive'] == false) { i++; return; }
+      final trail = (data['trail'] as List? ?? []);
+      if (trail.isEmpty) { i++; return; }
       final c = id == myId ? const Color(0xFFB7F34A) : colors[i % colors.length];
-      canvas.drawCircle(Offset(px,py), 10, Paint()..color = c);
-      canvas.drawCircle(Offset(px,py), 13, Paint()..color = c.withOpacity(.22));
+      final bodyPaint = Paint()..color = c;
+      final outline = Paint()..color = c.withOpacity(.32)..style = PaintingStyle.stroke..strokeWidth = 2;
+      for (int j = trail.length - 1; j >= 0; j--) {
+        final pt = trail[j];
+        if (pt is! Map) continue;
+        final px = ((pt['x'] ?? .5) as num).toDouble().clamp(0,1) * size.width;
+        final py = ((pt['y'] ?? .5) as num).toDouble().clamp(0,1) * size.height;
+        canvas.drawCircle(Offset(px,py), j == 0 ? 8 : 6, bodyPaint);
+        if (j == 0) {
+          canvas.drawCircle(Offset(px,py), 11, outline);
+          final eye = Paint()..color = const Color(0xFF101611);
+          canvas.drawCircle(Offset(px-2.5,py-2), 1.5, eye);
+          canvas.drawCircle(Offset(px+2.5,py-2), 1.5, eye);
+        }
+      }
       i++;
     });
   }
