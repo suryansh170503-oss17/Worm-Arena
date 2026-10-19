@@ -21,13 +21,16 @@ const TRAIL_SPACING = 0.010;
 const FOOD_RADIUS = 0.027;
 const COLLISION_RADIUS = 0.014;
 const MAX_TRAIL_POINTS = 160;
+const WORLD_H = 9 / 16;       // arena is 1.0 wide x 0.5625 tall (16:9); client letterboxes to match
+const r4 = n => Math.round(n * 10000) / 10000;
 
 function roomCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   return Array.from({ length: 6 }, () => chars[crypto.randomInt(chars.length)]).join('');
 }
 function rand() { return 0.08 + Math.random() * 0.84; }
-function foodItem() { return { id: crypto.randomUUID(), x: rand(), y: rand() }; }
+function randY() { return WORLD_H * (0.08 + Math.random() * 0.84); }
+function foodItem() { return { id: crypto.randomUUID(), x: r4(rand()), y: r4(randY()) }; }
 function send(ws, obj) {
   if (ws.readyState === 1) ws.send(JSON.stringify(obj));
 }
@@ -45,8 +48,9 @@ function publicState(room) {
       id: p.id, name: p.name, host: p.id === room.hostId,
       score: p.score, length: p.trail.length, alive: p.alive
     })),
+    worldH: WORLD_H,
     worms: Object.fromEntries([...room.players.values()].map(p => [p.id, {
-      trail: p.trail, alive: p.alive, score: p.score, name: p.name
+      trail: p.trail.map(t => ({ x: r4(t.x), y: r4(t.y) })), alive: p.alive, score: p.score, name: p.name
     }])),
     food: room.food
   };
@@ -81,11 +85,12 @@ function removePlayer(ws) {
   }
 }
 function spawnTrail() {
-  const x = rand(), y = rand();
+  const x = rand(), y = randY();
   return Array.from({ length: 10 }, (_, i) => ({ x: Math.max(0.02, x - i * TRAIL_SPACING), y }));
 }
 function respawn(p) {
   p.alive = true;
+  p.dir = { x: 1, y: 0 };
   p.score = Math.max(0, p.score - 2);
   p.trail = spawnTrail();
   p.head = { x: p.trail[0].x, y: p.trail[0].y };
@@ -99,12 +104,15 @@ function pointSegmentDistance(point, a, b) {
   return Math.hypot(point.x - (a.x + t * vx), point.y - (a.y + t * vy));
 }
 function addTrailPoint(p, point) {
-  const head = p.trail[0];
-  if (!head || distance(head, point) >= TRAIL_SPACING) {
-    p.trail.unshift(point);
-    const desired = Math.min(MAX_TRAIL_POINTS, 10 + p.score * 3);
-    while (p.trail.length > desired) p.trail.pop();
+  // trail[0] is always the live head; a new fixed body point is added each time
+  // the head has moved TRAIL_SPACING away from the previous body point.
+  if (p.trail.length < 2 || distance(p.trail[1], point) >= TRAIL_SPACING) {
+    p.trail.unshift({ x: point.x, y: point.y });
+  } else {
+    p.trail[0] = { x: point.x, y: point.y };
   }
+  const desired = Math.min(MAX_TRAIL_POINTS, 10 + p.score * 3);
+  while (p.trail.length > desired) p.trail.pop();
 }
 function collectFood(room, p, oldHead, newHead) {
   for (let i = room.food.length - 1; i >= 0; i--) {
@@ -127,19 +135,12 @@ function simulationStep(room) {
   // Move continuously based on each player's most recent steering direction.
   for (const p of room.players.values()) {
     if (!p.alive || !p.trail.length) continue;
-    const old = p.trail[0];
+    const old = p.head || p.trail[0];
     previousHeads.set(p.id, { x: old.x, y: old.y });
     const nx = Math.max(0.015, Math.min(0.985, old.x + p.dir.x * SPEED * dt));
-    const ny = Math.max(0.015, Math.min(0.985, old.y + p.dir.y * SPEED * dt));
+    const ny = Math.max(0.015, Math.min(WORLD_H - 0.015, old.y + p.dir.y * SPEED * dt));
     const next = { x: nx, y: ny };
     collectFood(room, p, old, next);
-    // Growth preserves tail points; otherwise remove the tail normally.
-    if (p.growth > 0) p.growth--;
-    else {
-      const target = Math.max(10, Math.min(MAX_TRAIL_POINTS, 10 + p.score * 3));
-      while (p.trail.length > target) p.trail.pop();
-    }
-    // Maintain evenly spaced body segments and a fresh head point.
     addTrailPoint(p, next);
     p.head = next;
   }
@@ -209,6 +210,11 @@ wss.on('connection', ws => {
     if (m.type === 'start') {
       if (String(m.playerId) !== room.hostId) return send(ws, { type: 'error', message: 'Only the host can start' });
       if (room.players.size < 2) return send(ws, { type: 'error', message: 'At least 2 players are required' });
+      for (const q of room.players.values()) {
+        q.score = 0; q.alive = true; q.growth = 0; q.trail = spawnTrail();
+        q.head = { x: q.trail[0].x, y: q.trail[0].y }; q.dir = { x: 1, y: 0 };
+      }
+      room.food = Array.from({ length: FOOD_COUNT }, foodItem);
       room.started = true;
       room.endsAt = Date.now() + room.minutes * 60 * 1000;
       room.tickCount = 0;
