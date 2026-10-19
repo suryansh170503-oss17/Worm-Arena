@@ -231,15 +231,31 @@ class _LobbyScreenState extends State<LobbyScreen> {
             Text('${secondsLeft ~/ 60}:${(secondsLeft % 60).toString().padLeft(2, '0')}',
               textAlign: TextAlign.center, style: const TextStyle(fontSize: 34, color: lime, fontWeight: FontWeight.bold)),
             const SizedBox(height: 8),
-            Expanded(flex: 2, child: ClipRRect(borderRadius: BorderRadius.circular(16),
-              child: CustomPaint(painter: ArenaPainter(worms, food, widget.playerId), child: const SizedBox.expand()))),
-            const SizedBox(height: 10),
-            Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
-              IconButton.filled(onPressed: () => move(-.04, 0), icon: const Icon(Icons.arrow_left)),
-              IconButton.filled(onPressed: () => move(0, -.04), icon: const Icon(Icons.arrow_upward)),
-              IconButton.filled(onPressed: () => move(0, .04), icon: const Icon(Icons.arrow_downward)),
-              IconButton.filled(onPressed: () => move(.04, 0), icon: const Icon(Icons.arrow_right)),
-            ]),
+            Expanded(flex: 2, child: ClipRRect(
+              borderRadius: BorderRadius.circular(16),
+              child: LayoutBuilder(builder: (context, constraints) {
+                return GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onPanUpdate: (details) {
+                    // Drag anywhere inside the arena to steer your worm.
+                    // Convert screen pixels to normalized arena coordinates.
+                    final dx = details.delta.dx / constraints.maxWidth;
+                    final dy = details.delta.dy / constraints.maxHeight;
+                    move(dx, dy);
+                  },
+                  child: CustomPaint(
+                    painter: ArenaPainter(worms, food, widget.playerId),
+                    child: const SizedBox.expand(),
+                  ),
+                );
+              }),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'DRAG YOUR FINGER IN THE ARENA TO MOVE',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.white54, fontSize: 11, letterSpacing: 1),
+            ),
           ] else if (finalRanking.isNotEmpty) ...[
             const Text('MATCH RESULTS', textAlign: TextAlign.center, style: TextStyle(color: lime, fontSize: 20, fontWeight: FontWeight.bold)),
             ...finalRanking.take(8).map((p) => ListTile(
